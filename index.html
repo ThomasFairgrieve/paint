@@ -3,172 +3,187 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AI Wall Painter</title>
+    <title>Tap-to-Paint AR</title>
     
     <!-- PWA Manifest -->
-    <link rel="manifest" href='data:application/manifest+json,{"name":"AI Wall Painter","short_name":"Painter","start_url":".","display":"standalone","background_color":"#000000","theme_color":"#2196F3","icons":[{"src":"https://cdn-icons-png.flaticon.com/512/3532/3532851.png","sizes":"512x512","type":"image/png"}]}'>
+    <link rel="manifest" href='data:application/manifest+json,{"name":"TapPainter","short_name":"TapPaint","start_url":".","display":"standalone","background_color":"#000000","theme_color":"#2196F3","icons":[{"src":"https://cdn-icons-png.flaticon.com/512/3532/3532851.png","sizes":"512x512","type":"image/png"}]}'>
     <meta name="theme-color" content="#2196F3">
-    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3532/3532851.png">
 
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: -apple-system, sans-serif; }
-        #container { position: relative; width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+        #app { position: relative; width: 100vw; height: 100vh; touch-action: none; }
         
-        /* Video and Canvas sizing */
         video { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #overlay { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 2; pointer-events: none; opacity: 0.7; }
+        canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 2; pointer-events: none; }
         
-        #ui {
-            position: absolute; bottom: 30px; left: 0; right: 0;
-            display: flex; flex-direction: column; align-items: center;
-            z-index: 10; gap: 15px;
+        .ui-panel {
+            position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
+            background: rgba(0,0,0,0.8); backdrop-filter: blur(10px);
+            padding: 20px; border-top-left-radius: 20px; border-top-right-radius: 20px;
+            display: flex; flex-direction: column; gap: 15px; color: white;
         }
-        .controls-card {
-            background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px);
-            padding: 20px; border-radius: 25px; border: 1px solid rgba(255,255,255,0.1);
-            display: flex; flex-direction: column; align-items: center; min-width: 200px;
-        }
+        
+        .row { display: flex; align-items: center; gap: 15px; justify-content: space-between; }
+        .slider-box { flex-grow: 1; }
+        input[type="range"] { width: 100%; }
+        
         input[type="color"] {
-            -webkit-appearance: none; border: none; width: 70px; height: 70px;
-            border-radius: 50%; cursor: pointer; background: none; margin-bottom: 10px;
+            -webkit-appearance: none; border: 2px solid white; width: 50px; height: 50px;
+            border-radius: 10px; background: none; cursor: pointer;
         }
-        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
-        input[type="color"]::-webkit-color-swatch { border: 3px solid white; border-radius: 50%; }
         
-        #status { color: white; font-size: 14px; font-weight: 500; text-align: center; margin-bottom: 5px; }
-        .loader { width: 20px; height: 20px; border: 3px solid #f3f3f3; border-top: 3px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-right: 8px; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        button {
+            background: #444; color: white; border: none; padding: 10px 20px;
+            border-radius: 10px; font-weight: bold;
+        }
+        
+        #hint {
+            position: absolute; top: 20px; width: 100%; text-align: center;
+            z-index: 5; color: white; text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+            font-size: 14px; pointer-events: none;
+        }
     </style>
 </head>
 <body>
 
-<div id="container">
+<div id="app">
+    <div id="hint">Tap a wall to paint it</div>
     <video id="video" autoplay playsinline muted></video>
-    <canvas id="overlay"></canvas>
+    <canvas id="paintCanvas"></canvas>
     
-    <div id="ui">
-        <div class="controls-card">
-            <div id="status"><div class="loader"></div>Initializing AI...</div>
+    <div class="ui-panel">
+        <div class="row">
             <input type="color" id="colorPicker" value="#3498db">
-            <div style="color: #ccc; font-size: 12px;">Point at a wall to paint</div>
+            <div class="slider-box">
+                <label>Tolerance</label>
+                <input type="range" id="tolerance" min="1" max="150" value="40">
+            </div>
+            <button onclick="clearCanvas()">Clear</button>
         </div>
     </div>
 </div>
 
-<!-- Dependencies -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@0.2.2"></script>
-
 <script>
-/** 1. SERVICE WORKER / PWA LOGIC **/
+/** 1. PWA SERVICE WORKER **/
 if (location.search.includes('sw')) {
     self.addEventListener('install', e => self.skipWaiting());
-    self.addEventListener('activate', e => e.waitUntil(clients.claim()));
     self.addEventListener('fetch', e => e.respondWith(fetch(e.request)));
 } else if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register(window.location.href + '?sw');
 }
 
-/** 2. APP LOGIC **/
+/** 2. CAMERA SETUP **/
 const video = document.getElementById('video');
-const canvas = document.getElementById('overlay');
+const canvas = document.getElementById('paintCanvas');
 const ctx = canvas.getContext('2d');
-const statusText = document.getElementById('status');
 const colorPicker = document.getElementById('colorPicker');
+const toleranceInput = document.getElementById('tolerance');
 
-let model;
-let wallColorRGB = null;
-let userPaintColor = { r: 52, g: 152, b: 219 };
+// Hidden canvas to process frames
+const procCanvas = document.createElement('canvas');
+const procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
 
-// Sync color picker
-colorPicker.addEventListener('input', (e) => {
-    const hex = e.target.value;
-    userPaintColor = {
-        r: parseInt(hex.slice(1, 3), 16),
-        g: parseInt(hex.slice(3, 5), 16),
-        b: parseInt(hex.slice(5, 7), 16)
+async function initCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false
+    });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        procCanvas.width = video.videoWidth;
+        procCanvas.height = video.videoHeight;
     };
+}
+
+/** 3. FLOOD FILL LOGIC **/
+function getPixelPos(x, y, width) {
+    return (y * width + x) * 4;
+}
+
+function getColorDist(r1, g1, b1, r2, g2, b2) {
+    // Euclidean distance in RGB space
+    return Math.sqrt((r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2);
+}
+
+function floodFill(startX, startY) {
+    // 1. Snapshot the current video frame for analysis
+    procCtx.drawImage(video, 0, 0, procCanvas.width, procCanvas.height);
+    const imgData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
+    const pixels = imgData.data;
+    
+    // 2. Prepare the Paint Overlay
+    const overlayData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const overlayPixels = overlayData.data;
+
+    const width = procCanvas.width;
+    const height = procCanvas.height;
+    const tolerance = parseInt(toleranceInput.value);
+    
+    // 3. Get target color
+    const startPos = getPixelPos(startX, startY, width);
+    const startR = pixels[startPos];
+    const startG = pixels[startPos+1];
+    const startB = pixels[startPos+2];
+
+    // 4. Get paint color
+    const hex = colorPicker.value;
+    const pR = parseInt(hex.slice(1, 3), 16);
+    const pG = parseInt(hex.slice(3, 5), 16);
+    const pB = parseInt(hex.slice(5, 7), 16);
+
+    // 5. Algorithm (Queue-based Flood Fill)
+    const queue = [[startX, startY]];
+    const visited = new Uint8Array(width * height);
+    
+    while (queue.length > 0) {
+        const [x, y] = queue.pop();
+        const pos = getPixelPos(x, y, width);
+        const idx = y * width + x;
+
+        if (visited[idx]) continue;
+        visited[idx] = 1;
+
+        const dist = getColorDist(startR, startG, startB, pixels[pos], pixels[pos+1], pixels[pos+2]);
+
+        if (dist < tolerance) {
+            // Apply paint to overlay
+            overlayPixels[pos] = pR;
+            overlayPixels[pos+1] = pG;
+            overlayPixels[pos+2] = pB;
+            overlayPixels[pos+3] = 180; // Opacity (0-255)
+
+            // Add neighbors
+            if (x > 0) queue.push([x - 1, y]);
+            if (x < width - 1) queue.push([x + 1, y]);
+            if (y > 0) queue.push([x, y - 1]);
+            if (y < height - 1) queue.push([x, y + 1]);
+        }
+    }
+
+    ctx.putImageData(overlayData, 0, 0);
+}
+
+/** 4. INTERACTION **/
+document.getElementById('app').addEventListener('pointerdown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+
+    // Convert screen tap coordinates to canvas coordinates
+    const rect = video.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = Math.floor((e.clientX - rect.left) * scaleX);
+    const y = Math.floor((e.clientY - rect.top) * scaleY);
+
+    floodFill(x, y);
 });
 
-async function init() {
-    try {
-        // 1. Load ADE20K Model
-        statusText.innerHTML = '<div class="loader"></div>Loading Wall Model...';
-        model = await deeplab.load({ base: 'ade20k', quantizationBytes: 2 });
-        
-        // 2. Setup Camera
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
-            audio: false
-        });
-        video.srcObject = stream;
-        
-        video.onloadedmetadata = () => {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            predict();
-        };
-    } catch (err) {
-        statusText.innerText = "Error: " + err.message;
-        console.error(err);
-    }
-}
-
-async function predict() {
-    if (!model) return;
-
-    // Perform Segmentation
-    // ADE20K identifies "wall" specifically.
-    const prediction = await model.segment(video);
-    const { legend, segmentationMap, width, height } = prediction;
-
-    // Find the internal color used by the model to represent 'wall'
-    if (!wallColorRGB) {
-        const wallKey = Object.keys(legend).find(k => k.toLowerCase().includes('wall'));
-        if (wallKey) {
-            wallColorRGB = legend[wallKey];
-            statusText.innerText = "Wall Painting Active";
-        } else {
-            statusText.innerText = "Wall class not found";
-        }
-    }
-
-    // Process the segmentation map
-    // The map is a Uint8ClampedArray of RGBA values where each pixel's color 
-    // represents a class defined in the legend.
-    const imgData = ctx.createImageData(width, height);
-    
-    for (let i = 0; i < segmentationMap.length; i += 4) {
-        const r = segmentationMap[i];
-        const g = segmentationMap[i+1];
-        const b = segmentationMap[i+2];
-
-        // If this pixel's color matches the 'wall' color in the legend
-        if (wallColorRGB && r === wallColorRGB[0] && g === wallColorRGB[1] && b === wallColorRGB[2]) {
-            imgData.data[i] = userPaintColor.r;
-            imgData.data[i+1] = userPaintColor.g;
-            imgData.data[i+2] = userPaintColor.b;
-            imgData.data[i+3] = 255; // Full opacity on the mask (CSS controls overall layer opacity)
-        } else {
-            imgData.data[i+3] = 0; // Transparent (not a wall)
-        }
-    }
-
-    // Draw prediction to overlay
-    // We use a temporary canvas to scale the segmentation back to the UI size if needed
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = width;
-    tempCanvas.height = height;
-    tempCanvas.getContext('2d').putImageData(imgData, 0, 0);
-
+function clearCanvas() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
-
-    // Loop
-    requestAnimationFrame(predict);
 }
 
-init();
+initCamera();
 </script>
 </body>
 </html>
